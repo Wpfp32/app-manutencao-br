@@ -1,4 +1,4 @@
-import sqlite3
+import psycopg2
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -6,18 +6,26 @@ from datetime import date, timedelta
 import math
 import io
 from dateutil.relativedelta import relativedelta
+import warnings
+
+# Remove avisos internos do Pandas no log do servidor
+warnings.filterwarnings('ignore')
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Manutenção | BR Construções", page_icon="🚜", layout="wide")
 
-# --- BANCO DE DADOS ---
+# --- BANCO DE DADOS NA NUVEM (SUPABASE) ---
+@st.cache_resource
 def conectar_banco():
-    conn = sqlite3.connect('manutencao_frota.db')
+    # Puxa a chave do cofre secreto do Streamlit
+    conn = psycopg2.connect(st.secrets["DATABASE_URL"])
+    conn.autocommit = True # Facilita transações no Postgres
     cursor = conn.cursor()
     
+    # SERIAL é o AUTOINCREMENT do PostgreSQL
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS equipamentos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             tag TEXT UNIQUE,
             modelo TEXT,
             tipo_medidor TEXT, 
@@ -28,7 +36,7 @@ def conectar_banco():
     ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS leituras (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             tag_equipamento TEXT,
             data_leitura DATE,
             valor_medidor REAL
@@ -36,14 +44,13 @@ def conectar_banco():
     ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS historico_manutencoes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             tag_equipamento TEXT,
             data_manutencao DATE,
             valor_execucao REAL,
             tipo_revisao TEXT
         )
     ''')
-    conn.commit()
     return conn
 
 conn = conectar_banco()
@@ -111,11 +118,12 @@ else:
             tipo_medidor_atual = next(m[1] for m in maquinas_no_banco if m[0] == tag_selecionada)
             unidade = "h" if tipo_medidor_atual == "Horímetro" else "km"
             
+            # Mudança de ? para %s para funcionar no Postgres
             query_ultimo = """
                 SELECT COALESCE(MAX(l.valor_medidor), e.medidor_ultima_revisao)
                 FROM equipamentos e
                 LEFT JOIN leituras l ON e.tag = l.tag_equipamento
-                WHERE e.tag = ?
+                WHERE e.tag = %s
             """
             cursor.execute(query_ultimo, (tag_selecionada,))
             ultimo_medidor = cursor.fetchone()[0]
@@ -129,8 +137,7 @@ else:
                 if medidor_novo < ultimo_medidor:
                     st.error("Operação cancelada: O valor digitado é menor que o último registro.")
                 else:
-                    cursor.execute("INSERT INTO leituras (tag_equipamento, data_leitura, valor_medidor) VALUES (?, ?, ?)", (tag_selecionada, data_hoje, medidor_novo))
-                    conn.commit()
+                    cursor.execute("INSERT INTO leituras (tag_equipamento, data_leitura, valor_medidor) VALUES (%s, %s, %s)", (tag_selecionada, data_hoje, medidor_novo))
                     st.success(f"Leitura de {medidor_novo}{unidade} registrada com sucesso!")
                     st.rerun()
         else:
@@ -181,7 +188,7 @@ else:
                         data_leitura = row['DATA_LEITURA']
                         valor = float(row['VALOR_ATUAL'])
                         
-                        cursor.execute("SELECT medidor_ultima_revisao FROM equipamentos WHERE tag = ?", (tag,))
+                        cursor.execute("SELECT medidor_ultima_revisao FROM equipamentos WHERE tag = %s", (tag,))
                         equipamento = cursor.fetchone()
                         
                         if not equipamento:
@@ -192,7 +199,7 @@ else:
                             SELECT COALESCE(MAX(l.valor_medidor), e.medidor_ultima_revisao)
                             FROM equipamentos e
                             LEFT JOIN leituras l ON e.tag = l.tag_equipamento
-                            WHERE e.tag = ?
+                            WHERE e.tag = %s
                         """
                         cursor.execute(query_ultimo, (tag,))
                         ultimo_medidor = cursor.fetchone()[0]
@@ -201,11 +208,9 @@ else:
                             erros.append(f"Linha {index + 2}: Valor de '{tag}' ({valor}) é MENOR que o último registro ({ultimo_medidor}). Ignorado.")
                             continue
                             
-                        cursor.execute("INSERT INTO leituras (tag_equipamento, data_leitura, valor_medidor) VALUES (?, ?, ?)", (tag, data_leitura, valor))
+                        cursor.execute("INSERT INTO leituras (tag_equipamento, data_leitura, valor_medidor) VALUES (%s, %s, %s)", (tag, data_leitura, valor))
                         sucessos += 1
                         
-                    conn.commit()
-                    
                     if sucessos > 0:
                         st.success(f"✅ Sucesso! {sucessos} leituras registradas no sistema.")
                     if erros:
@@ -363,7 +368,7 @@ else:
             tipo_medidor_atual = next(m[1] for m in maquinas_no_banco if m[0] == tag_selecionada)
             unidade = "h" if tipo_medidor_atual == "Horímetro" else "km"
             
-            cursor.execute("SELECT medidor_ultima_revisao, data_ultima_revisao FROM equipamentos WHERE tag = ?", (tag_selecionada,))
+            cursor.execute("SELECT medidor_ultima_revisao, data_ultima_revisao FROM equipamentos WHERE tag = %s", (tag_selecionada,))
             dados_revisao = cursor.fetchone()
             ultima_rev_val = dados_revisao[0]
             
@@ -371,7 +376,7 @@ else:
                 SELECT COALESCE(MAX(l.valor_medidor), e.medidor_ultima_revisao)
                 FROM equipamentos e
                 LEFT JOIN leituras l ON e.tag = l.tag_equipamento
-                WHERE e.tag = ?
+                WHERE e.tag = %s
             """
             cursor.execute(query_ultimo, (tag_selecionada,))
             medidor_atual_val = cursor.fetchone()[0]
@@ -395,10 +400,9 @@ else:
             
             if st.button("Confirmar Conclusão da Revisão"):
                 novo_tipo_base = 1000 if tipo_rev_concluida == "1000h" else 500
-                cursor.execute("UPDATE equipamentos SET medidor_ultima_revisao = ?, data_ultima_revisao = ?, tipo_ultima_revisao = ? WHERE tag = ?", (medidor_fechamento, data_fechamento, novo_tipo_base, tag_selecionada))
-                cursor.execute("INSERT INTO leituras (tag_equipamento, data_leitura, valor_medidor) VALUES (?, ?, ?)", (tag_selecionada, data_fechamento, medidor_fechamento))
-                cursor.execute("INSERT INTO historico_manutencoes (tag_equipamento, data_manutencao, valor_execucao, tipo_revisao) VALUES (?, ?, ?, ?)", (tag_selecionada, data_fechamento, medidor_fechamento, f"Revisão {tipo_rev_concluida}"))
-                conn.commit()
+                cursor.execute("UPDATE equipamentos SET medidor_ultima_revisao = %s, data_ultima_revisao = %s, tipo_ultima_revisao = %s WHERE tag = %s", (medidor_fechamento, data_fechamento, novo_tipo_base, tag_selecionada))
+                cursor.execute("INSERT INTO leituras (tag_equipamento, data_leitura, valor_medidor) VALUES (%s, %s, %s)", (tag_selecionada, data_fechamento, medidor_fechamento))
+                cursor.execute("INSERT INTO historico_manutencoes (tag_equipamento, data_manutencao, valor_execucao, tipo_revisao) VALUES (%s, %s, %s, %s)", (tag_selecionada, data_fechamento, medidor_fechamento, f"Revisão {tipo_rev_concluida}"))
                 st.success("Revisão salva no histórico permanente e ciclos reiniciados!")
                 st.rerun()
         else:
@@ -422,11 +426,10 @@ else:
             if not nova_tag:
                 st.error("A TAG não pode ficar em branco.")
             else:
-                cursor.execute("SELECT tag FROM equipamentos WHERE tag = ?", (nova_tag,))
+                cursor.execute("SELECT tag FROM equipamentos WHERE tag = %s", (nova_tag,))
                 if cursor.fetchone():
                     st.error(f"A TAG {nova_tag} já está cadastrada no sistema!")
                 else:
-                    cursor.execute("INSERT INTO equipamentos (tag, modelo, tipo_medidor, medidor_ultima_revisao, data_ultima_revisao, tipo_ultima_revisao) VALUES (?, ?, ?, ?, ?, ?)", 
+                    cursor.execute("INSERT INTO equipamentos (tag, modelo, tipo_medidor, medidor_ultima_revisao, data_ultima_revisao, tipo_ultima_revisao) VALUES (%s, %s, %s, %s, %s, %s)", 
                                    (nova_tag, novo_modelo, tipo_medicao, medidor_base, data_revisao_base, 500))
-                    conn.commit()
                     st.success(f"Ativo {nova_tag} cadastrado com sucesso!")
