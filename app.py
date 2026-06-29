@@ -241,7 +241,7 @@ else:
                 MIN(l.valor_medidor) AS "Uso Inicial"
             FROM equipamentos e
             LEFT JOIN leituras l ON e.tag = l.tag_equipamento
-            GROUP BY e.tag
+            GROUP BY e.tag, e.modelo, e.tipo_medidor, e.medidor_ultima_revisao, e.data_ultima_revisao
         """
         df_frota = pd.read_sql_query(query, conn)
         
