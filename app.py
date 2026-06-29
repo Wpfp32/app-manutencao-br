@@ -13,46 +13,21 @@ warnings.filterwarnings('ignore')
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Manutenção | BR Construções", page_icon="🚜", layout="wide")
 
-# --- BANCO DE DADOS (CONEXÃO SEGURA VIA SECRETS) ---
+# --- BANCO DE DADOS (CONEXÃO SEGURA) ---
 @st.cache_resource
 def conectar_banco():
     conn = psycopg2.connect(st.secrets["DATABASE_URL"])
     conn.autocommit = True 
     cursor = conn.cursor()
     
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS equipamentos (
-            id SERIAL PRIMARY KEY,
-            tag TEXT UNIQUE,
-            modelo TEXT,
-            tipo_medidor TEXT, 
-            medidor_ultima_revisao REAL,
-            data_ultima_revisao DATE,
-            tipo_ultima_revisao INTEGER
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS leituras (
-            id SERIAL PRIMARY KEY,
-            tag_equipamento TEXT,
-            data_leitura DATE,
-            valor_medidor REAL
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS historico_manutencoes (
-            id SERIAL PRIMARY KEY,
-            tag_equipamento TEXT,
-            data_manutencao DATE,
-            valor_execucao REAL,
-            tipo_revisao TEXT
-        )
-    ''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS equipamentos (id SERIAL PRIMARY KEY, tag TEXT UNIQUE, modelo TEXT, tipo_medidor TEXT, medidor_ultima_revisao REAL, data_ultima_revisao DATE, tipo_ultima_revisao INTEGER)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS leituras (id SERIAL PRIMARY KEY, tag_equipamento TEXT, data_leitura DATE, valor_medidor REAL)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS historico_manutencoes (id SERIAL PRIMARY KEY, tag_equipamento TEXT, data_manutencao DATE, valor_execucao REAL, tipo_revisao TEXT)''')
     return conn
 
 conn = conectar_banco()
 
-# --- GERENCIAMENTO DE SESSÃO (LOGIN) ---
+# --- LOGIN ---
 if "logado" not in st.session_state:
     st.session_state.logado = False
     st.session_state.perfil = ""
@@ -75,14 +50,14 @@ if not st.session_state.logado:
             else:
                 st.error("Usuário ou senha incorretos.")
 else:
-    # --- NAVEGAÇÃO LATERAL ---
+    # --- NAVEGAÇÃO ---
     st.sidebar.title("🚜 BR Construções")
-    st.sidebar.write(f"👤 Logado como: **{st.session_state.perfil}**")
+    st.sidebar.write(f"👤 Perfil: **{st.session_state.perfil}**")
     if st.sidebar.button("Sair"):
         st.session_state.logado = False
         st.rerun()
     
-    opcoes = ["Apontamento Diário"] if st.session_state.perfil == "Operador" else ["Dashboard de Revisões", "Apontamento Diário", "Upload em Lote (Offline)", "Registrar Manutenção (Dar Baixa)", "Cadastrar Máquina"]
+    opcoes = ["Apontamento Diário"] if st.session_state.perfil == "Operador" else ["Dashboard de Revisões", "Apontamento Diário", "Upload em Lote (Offline)", "Registrar Manutenção (Dar Baixa)", "Cadastrar Máquina", "Gerenciar Frota"]
     menu = st.sidebar.radio("Navegação", opcoes)
 
     # --- TELA: APONTAMENTO ---
@@ -91,32 +66,28 @@ else:
         cursor = conn.cursor()
         cursor.execute("SELECT tag, tipo_medidor FROM equipamentos ORDER BY tag")
         equipamentos = cursor.fetchall()
-        
         if equipamentos:
             tag_sel = st.selectbox("Selecione o Equipamento", [e[0] for e in equipamentos])
             tipo = next(e[1] for e in equipamentos if e[0] == tag_sel)
             unid = "h" if tipo == "Horímetro" else "km"
-            
             cursor.execute("SELECT COALESCE(MAX(valor_medidor), 0) FROM leituras WHERE tag_equipamento = %s", (tag_sel,))
             ultimo = cursor.fetchone()[0]
-            st.info(f"Última leitura: {ultimo} {unid}")
-            
+            st.info(f"Última leitura registrada: {ultimo} {unid}")
             val = st.number_input(f"Novo valor ({unid})", min_value=float(ultimo), value=float(ultimo))
-            if st.button("Registrar"):
+            if st.button("Registrar Leitura"):
                 cursor.execute("INSERT INTO leituras (tag_equipamento, data_leitura, valor_medidor) VALUES (%s, %s, %s)", (tag_sel, date.today(), val))
-                st.success("Registrado!")
-        else: st.warning("Cadastre uma máquina primeiro.")
+                st.success("Registrado com sucesso!")
+        else: st.warning("Nenhum equipamento cadastrado.")
 
-    # --- TELA: DASHBOARD (GESTÃO) ---
+    # --- TELA: DASHBOARD ---
     elif menu == "Dashboard de Revisões":
         st.header("Status da Frota")
-        query = """SELECT e.tag, e.modelo, e.tipo_medidor, e.medidor_ultima_revisao, COALESCE(MAX(l.valor_medidor), 0) as atual 
+        query = """SELECT e.tag, e.modelo, e.tipo_medidor, COALESCE(MAX(l.valor_medidor), e.medidor_ultima_revisao) as atual 
                    FROM equipamentos e LEFT JOIN leituras l ON e.tag = l.tag_equipamento GROUP BY e.tag, e.modelo, e.tipo_medidor, e.medidor_ultima_revisao"""
         df = pd.read_sql_query(query, conn)
         st.dataframe(df, use_container_width=True)
-        with st.expander("Histórico de Manutenções"):
-            df_hist = pd.read_sql_query("SELECT * FROM historico_manutencoes ORDER BY id DESC", conn)
-            st.dataframe(df_hist)
+        fig = px.pie(df, names="tipo_medidor", title="Frota por Tipo de Medição")
+        st.plotly_chart(fig, use_container_width=True)
 
     # --- TELA: REGISTRAR MANUTENÇÃO ---
     elif menu == "Registrar Manutenção (Dar Baixa)":
@@ -128,9 +99,9 @@ else:
         val = st.number_input("Valor de fechamento da revisão")
         if st.button("Confirmar Baixa"):
             cursor.execute("UPDATE equipamentos SET medidor_ultima_revisao = %s WHERE tag = %s", (val, tag_sel))
-            cursor.execute("INSERT INTO historico_manutencoes (tag_equipamento, data_manutancao, valor_execucao, tipo_revisao) VALUES (%s, %s, %s, %s)", 
+            cursor.execute("INSERT INTO historico_manutencoes (tag_equipamento, data_manutencao, valor_execucao, tipo_revisao) VALUES (%s, %s, %s, %s)", 
                            (tag_sel, date.today(), val, "Revisão Periódica"))
-            st.success("Baixa realizada!")
+            st.success("Revisão baixada com sucesso!")
 
     # --- TELA: CADASTRO ---
     elif menu == "Cadastrar Máquina":
@@ -143,6 +114,23 @@ else:
                 cursor = conn.cursor()
                 cursor.execute("INSERT INTO equipamentos (tag, modelo, tipo_medidor, medidor_ultima_revisao) VALUES (%s, %s, %s, %s)", (tag, mod, tipo, 0.0))
                 st.success("Salvo!")
+
+    # --- TELA: GERENCIAR FROTA (EXCLUSÃO) ---
+    elif menu == "Gerenciar Frota":
+        st.header("Gerenciamento de Ativos")
+        st.warning("⚠️ Cuidado: A exclusão de um equipamento removerá todo o histórico vinculado.")
+        cursor = conn.cursor()
+        cursor.execute("SELECT tag FROM equipamentos")
+        tags = [r[0] for r in cursor.fetchall()]
+        if tags:
+            tag_excluir = st.selectbox("Selecione o equipamento para REMOVER", tags)
+            if st.button("EXCLUIR EQUIPAMENTO", type="primary"):
+                cursor.execute("DELETE FROM leituras WHERE tag_equipamento = %s", (tag_excluir,))
+                cursor.execute("DELETE FROM historico_manutencoes WHERE tag_equipamento = %s", (tag_excluir,))
+                cursor.execute("DELETE FROM equipamentos WHERE tag = %s", (tag_excluir,))
+                st.success(f"Equipamento {tag_excluir} e seu histórico foram removidos.")
+                st.rerun()
+        else: st.info("Nenhum equipamento cadastrado.")
 
     # --- UPLOAD EM LOTE ---
     elif menu == "Upload em Lote (Offline)":
