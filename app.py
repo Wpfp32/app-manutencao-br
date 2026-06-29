@@ -1,49 +1,48 @@
 import psycopg2
 import streamlit as st
 import pandas as pd
-import warnings
 from datetime import date
 
-warnings.filterwarnings('ignore')
-st.set_page_config(page_title="BR Construções", layout="wide")
+st.set_page_config(layout="wide")
 
+# Conexão com timeout para evitar o carregamento eterno
 @st.cache_resource
 def conectar_banco():
-    url = "postgresql://postgres.iaslrpmmvbvxgrgldpbf:BrConstrucoes2026@aws-1-us-east-1.pooler.supabase.com:6543/postgres"
-    return psycopg2.connect(url, sslmode='require')
+    try:
+        # Aumentamos o timeout para 5 segundos
+        conn = psycopg2.connect(
+            st.secrets["DATABASE_URL"], 
+            sslmode='require',
+            connect_timeout=5
+        )
+        return conn
+    except Exception as e:
+        st.error(f"Erro de conexão: {e}")
+        return None
 
 conn = conectar_banco()
 
-# --- LOGIN ---
-if "logado" not in st.session_state: st.session_state.logado = False
-if not st.session_state.logado:
-    st.title("🚜 BR Construções - Acesso")
-    usuario = st.text_input("Usuário")
-    senha = st.text_input("Senha", type="password")
-    if st.button("Entrar"):
-        if usuario == "gestor" and senha == "admin":
-            st.session_state.logado = True; st.rerun()
-        else:
-            st.error("Credenciais inválidas.")
-else:
-    st.sidebar.title("Navegação")
-    menu = st.sidebar.radio("Menu", ["Dashboard", "Cadastrar Máquina"])
-    
-    if menu == "Dashboard":
-        st.header("Status da Frota")
-        # Query simplificada e sem aspas que causam erro
-        query = "SELECT tag, modelo, tipo_medidor, medidor_ultima_revisao FROM equipamentos"
-        df = pd.read_sql_query(query, conn)
-        st.dataframe(df, use_container_width=True)
+# Se não conectou, para a execução antes de travar a UI
+if conn is None:
+    st.error("O banco de dados não respondeu. Verifique a URL no Streamlit Cloud.")
+    st.stop()
 
-    elif menu == "Cadastrar Máquina":
-        st.header("Novo Equipamento")
-        with st.form("cadastro"):
-            tag = st.text_input("TAG")
-            modelo = st.text_input("Modelo")
-            tipo = st.selectbox("Tipo", ["Horímetro", "Hodômetro"])
-            if st.form_submit_button("Salvar"):
-                with conn.cursor() as cur:
-                    cur.execute("INSERT INTO equipamentos (tag, modelo, tipo_medidor, medidor_ultima_revisao, data_ultima_revisao) VALUES (%s, %s, %s, %s, %s)", 
-                                (tag.upper(), modelo, tipo, 0.0, date.today()))
-                st.success("Salvo!")
+# --- DASHBOARD ---
+st.header("Status da Frota")
+try:
+    with conn.cursor() as cur:
+        # Usando aspas triplas para garantir sintaxe SQL correta
+        cur.execute("""
+            SELECT tag, modelo, tipo_medidor, medidor_ultima_revisao 
+            FROM equipamentos
+        """)
+        dados = cur.fetchall()
+        colunas = ["TAG", "Modelo", "Medição", "Ultima Revisão"]
+        
+    if dados:
+        df = pd.DataFrame(dados, columns=colunas)
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("Banco conectado, mas não há dados cadastrados.")
+except Exception as e:
+    st.error(f"Erro ao buscar dados: {e}")
