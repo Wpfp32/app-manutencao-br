@@ -348,7 +348,7 @@ else:
             
         st.write("---")
         with st.expander("🔍 Ver Histórico de Manutenções Realizadas"):
-            df_historico = pd.read_sql_query("SELECT tag_equipamento AS 'TAG', data_manutencao AS 'Data', valor_execucao AS 'Medidor na Parada', tipo_revisao AS 'Tipo' FROM historico_manutencoes ORDER BY id DESC", conn)
+            df_historico = pd.read_sql_query("SELECT tag_equipamento AS "TAG", data_manutencao AS "Data", valor_execucao AS "Medidor na Parada", tipo_revisao AS "Tipo" FROM historico_manutencoes ORDER BY id DESC", conn)
             if not df_historico.empty:
                 st.dataframe(df_historico, use_container_width=True, hide_index=True)
             else:
